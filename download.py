@@ -24,6 +24,12 @@ from urllib import parse
 
 from tqdm import tqdm
 
+import tempfile
+import numpy as np
+import pandas as pd
+
+from pytube import YouTube
+
 
 subsets = ["RD", "WDA", "WRA"]
 
@@ -109,31 +115,35 @@ def download_and_process_video(video_data: Dict, output_dir: str):
     """
     Downloads the video and cuts/crops it into several ones according to the provided time intervals
     """
-    raw_download_path = os.path.join(output_dir, '_videos_raw', f"{video_data['name']}.mp4")
-    raw_download_log_file = os.path.join(output_dir, '_videos_raw', f"{video_data['name']}_download_log.txt")
-    download_result = download_video(video_data['id'], raw_download_path, resolution=video_data['resolution'], log_file=raw_download_log_file)
 
-    if not download_result:
-        print('Failed to download', video_data)
-        print(f'See {raw_download_log_file} for details')
-        return
+    try:
+        raw_download_path = os.path.join(output_dir, '_videos_raw', f"{video_data['name']}.mp4")
+        raw_download_log_file = os.path.join(output_dir, '_videos_raw', f"{video_data['name']}_download_log.txt")
+        download_result = download_video(video_data['id'], raw_download_path, resolution=video_data['resolution'], log_file=raw_download_log_file)
 
-    # We do not know beforehand, what will be the resolution of the downloaded video
-    # Youtube-dl selects a (presumably) highest one
-    video_resolution = get_video_resolution(raw_download_path)
-    if not video_resolution != video_data['resolution']:
-        print(f"Downloaded resolution is not correct for {video_data['name']}: {video_resolution} vs {video_data['name']}. Discarding this video.")
-        return
+        if not download_result:
+            print('Failed to download', video_data)
+            print(f'See {raw_download_log_file} for details')
+            return
 
-    for clip_idx in range(len(video_data['intervals'])):
-        start, end = video_data['intervals'][clip_idx]
-        clip_name = f'{video_data["name"]}_{clip_idx:03d}'
-        clip_path = os.path.join(output_dir, clip_name + '.mp4')
-        crop_success = cut_and_crop_video(raw_download_path, clip_path, start, end, video_data['crops'][clip_idx])
+        # We do not know beforehand, what will be the resolution of the downloaded video
+        # Youtube-dl selects a (presumably) highest one
+        video_resolution = get_video_resolution(raw_download_path)
+        if not video_resolution != video_data['resolution']:
+            print(f"Downloaded resolution is not correct for {video_data['name']}: {video_resolution} vs {video_data['name']}. Discarding this video.")
+            return
 
-        if not crop_success:
-            print(f'Failed to cut-and-crop clip #{clip_idx}', video_data)
-            continue
+        for clip_idx in range(len(video_data['intervals'])):
+            start, end = video_data['intervals'][clip_idx]
+            clip_name = f'{video_data["name"]}_{clip_idx:03d}'
+            clip_path = os.path.join(output_dir, clip_name + '.mp4')
+            crop_success = cut_and_crop_video(raw_download_path, clip_path, start, end, video_data['crops'][clip_idx])
+
+            if not crop_success:
+                print(f'Failed to cut-and-crop clip #{clip_idx}', video_data)
+                continue
+    except Exception as e:
+        print(f"Exception: {str(e)}")
 
 
 def read_file_as_space_separated_data(filepath: os.PathLike) -> Dict:
@@ -159,28 +169,63 @@ def download_video(video_id, download_path, resolution: int=None, video_format="
 
     Copy-pasted from https://github.com/ytdl-org/youtube-dl
     """
-    # if os.path.isfile(download_path): return True # File already exists
+    if os.path.isfile(download_path): return True # File already exists
 
     if log_file is None:
         stderr = subprocess.DEVNULL
     else:
         stderr = open(log_file, "a")
-    video_selection = f"bestvideo[ext={video_format}]"
-    video_selection = video_selection if resolution is None else f"{video_selection}[height={resolution}]"
-    command = [
-        "youtube-dl",
-        "https://youtube.com/watch?v={}".format(video_id), "--quiet", "-f",
-        video_selection,
-        "--output", download_path,
-        "--no-continue"
+
+    # video_selection = f"bestvideo[ext={video_format}]"
+    # video_selection = video_selection if resolution is None else f"{video_selection}[height={resolution}]"
+    # command = [
+    #     "youtube-dl",
+    #     "https://youtube.com/watch?v={}".format(video_id), "--quiet", "-f",
+    #     video_selection,
+    #     "--output", download_path,
+    #     "--no-continue"
+    # ]
+    # return_code = subprocess.call(command, stderr=stderr)
+    # success = return_code == 0
+
+    attributes = [
+        "itag", 
+        "mime_type", 
+        "resolution",
+        "fps", 
+        "video_codec", 
+        "audio_codec", 
+        "is_progressive", 
+        "type", 
+        "abr",
+        "includes_audio_track",
+        "includes_video_track",
     ]
-    return_code = subprocess.call(command, stderr=stderr)
-    success = return_code == 0
+    streams = YouTube(f"https://youtube.com/watch?v={video_id}").streams
+    streams_attributes = pd.DataFrame([{attr: getattr(o, attr, None) for attr in attributes} for o in streams])
+    streams_attributes["resolution"] = streams_attributes["resolution"].str.replace("p", "").fillna(-1).astype("int")
+    streams_attributes["abr"] = streams_attributes["abr"].str.replace("kbps", "").fillna(-1).astype("float")
+    max_resolution_stream = streams[int(streams_attributes[streams_attributes["resolution"] == streams_attributes["resolution"].max()].index.item())]
+    max_abr_stream = streams[int(streams_attributes[streams_attributes["abr"] == streams_attributes["abr"].max()].index.item())]
+    # print(f"max_resolution_stream: {max_resolution_stream}")
+    # print(f"max_abr_stream: {max_abr_stream}")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        temp_video_path = os.path.join(tmp_dir, f"video.{max_resolution_stream.mime_type.split('/')[-1]}")
+        temp_audio_path = os.path.join(tmp_dir, f"audio.{max_resolution_stream.mime_type.split('/')[-1]}")
+        max_resolution_stream.download(output_path=tmp_dir, filename=f"video.{max_resolution_stream.mime_type.split('/')[-1]}")
+        max_abr_stream.download(output_path=tmp_dir, filename=f"audio.{max_resolution_stream.mime_type.split('/')[-1]}")
+        # os.system(f"ffmpeg -i {temp_video_path} -i {temp_audio_path} {download_path}")
+        process = Popen(f"ffmpeg -y -i {temp_video_path} -i {temp_audio_path} -c:v copy -c:a aac {download_path}", stdout=PIPE, shell=True)
+        (output, err) = process.communicate()
+        return_code = process.wait()
+        success = return_code == 0
 
     if log_file is not None:
         stderr.close()
 
     return success and os.path.isfile(download_path)
+    # return os.path.isfile(download_path)
 
 
 def get_video_resolution(video_path: os.PathLike) -> int:
@@ -231,7 +276,7 @@ def cut_and_crop_video(raw_video_path, output_path, start, end, crop: List[int])
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download HDTF dataset")
     parser.add_argument('-s', '--source_dir', type=str, default='HDTF_dataset', help='Path to the directory with the dataset')
-    parser.add_argument('-o', '--output_dir', type=str, help='Where to save the videos?')
+    parser.add_argument('-o', '--output_dir', type=str, help='Where to save the videos?', default="downloads")
     parser.add_argument('-w', '--num_workers', type=int, default=8, help='Number of workers for downloading')
     args = parser.parse_args()
 
