@@ -13,6 +13,14 @@ $ python download.py --output_dir /tmp/data/hdtf --num_workers 8
 You need tqdm and youtube-dl libraries to be installed for this script to work.
 """
 
+#https://github.com/pytube/pytube/issues/1973
+from pytube.innertube import _default_clients
+_default_clients[ "ANDROID"][ "context"]["client"]["clientVersion"] = "19.08.35"
+_default_clients["IOS"]["context"]["client"]["clientVersion"] = "19.08.35"
+_default_clients[ "ANDROID_EMBED"][ "context"][ "client"]["clientVersion"] = "19.08.35"
+_default_clients[ "IOS_EMBED"][ "context"]["client"]["clientVersion"] = "19.08.35"
+_default_clients["IOS_MUSIC"][ "context"]["client"]["clientVersion"] = "6.41"
+_default_clients[ "ANDROID_MUSIC"] = _default_clients[ "ANDROID_CREATOR" ]
 
 import os
 import argparse
@@ -169,7 +177,9 @@ def download_video(video_id, download_path, resolution: int=None, video_format="
 
     Copy-pasted from https://github.com/ytdl-org/youtube-dl
     """
-    if os.path.isfile(download_path): return True # File already exists
+    if os.path.isfile(download_path): 
+        print("File exists...")
+        return True # File already exists
 
     if log_file is None:
         stderr = subprocess.DEVNULL
@@ -188,6 +198,8 @@ def download_video(video_id, download_path, resolution: int=None, video_format="
     # return_code = subprocess.call(command, stderr=stderr)
     # success = return_code == 0
 
+    resolution = int(resolution)
+
     attributes = [
         "itag", 
         "mime_type", 
@@ -205,8 +217,25 @@ def download_video(video_id, download_path, resolution: int=None, video_format="
     streams_attributes = pd.DataFrame([{attr: getattr(o, attr, None) for attr in attributes} for o in streams])
     streams_attributes["resolution"] = streams_attributes["resolution"].str.replace("p", "").fillna(-1).astype("int")
     streams_attributes["abr"] = streams_attributes["abr"].str.replace("kbps", "").fillna(-1).astype("float")
-    max_resolution_stream = streams[int(streams_attributes[streams_attributes["resolution"] == streams_attributes["resolution"].max()].index.item())]
-    max_abr_stream = streams[int(streams_attributes[streams_attributes["abr"] == streams_attributes["abr"].max()].index.item())]
+    if resolution is not None:
+        # int(streams_attributes[streams_attributes["resolution"] == streams_attributes["resolution"].max()].index.item())
+        # try:
+            video_stream_index = int(streams_attributes[streams_attributes["resolution"] == resolution].head(1).index.item())
+        # except Exception as e:
+        #     video_stream_index = int(streams_attributes.sort_values(by="resolution", ascending=False).head(1).index.item())
+        #     print(f"error finding video stream matching resolution: {resolution} but has stream of with resolution: {streams[video_stream_index].resolution}")
+        #     return False
+    else:
+        video_stream_index = int(streams_attributes.sort_values(by="resolution", ascending=False).head(1).index.item())
+
+    try:
+        audio_stream_index = int(streams_attributes[streams_attributes["mime_type"] == "audio/mp4"].sort_values(by="abr", ascending=False).head(1).index.item())
+    except Exception as e:
+        print("error finding audio stream of mime_type: audio/mp4")
+        audio_stream_index = int(streams_attributes.sort_values(by="abr", ascending=False).head(1).index.item())
+
+    max_resolution_stream = streams[video_stream_index]
+    max_abr_stream = streams[audio_stream_index]
     # print(f"max_resolution_stream: {max_resolution_stream}")
     # print(f"max_abr_stream: {max_abr_stream}")
 
@@ -216,7 +245,14 @@ def download_video(video_id, download_path, resolution: int=None, video_format="
         max_resolution_stream.download(output_path=tmp_dir, filename=f"video.{max_resolution_stream.mime_type.split('/')[-1]}")
         max_abr_stream.download(output_path=tmp_dir, filename=f"audio.{max_resolution_stream.mime_type.split('/')[-1]}")
         # os.system(f"ffmpeg -i {temp_video_path} -i {temp_audio_path} {download_path}")
-        process = Popen(f"ffmpeg -y -i {temp_video_path} -i {temp_audio_path} -c:v copy -c:a aac {download_path}", stdout=PIPE, shell=True)
+
+        # process = Popen(f"ffmpeg -y -i {temp_video_path} -i {temp_audio_path} -c:v copy -c:a aac {download_path}", stdout=PIPE, shell=True)
+        if max_resolution_stream.mime_type == "video/mp4" and max_abr_stream.mime_type == "audio/mp4":
+            process = Popen(f"ffmpeg -y -i {temp_video_path} -i {temp_audio_path} -c:v copy -c:a copy {download_path}", stdout=PIPE, shell=True)
+        if max_resolution_stream.mime_type == "video/mp4":
+            process = Popen(f"ffmpeg -y -i {temp_video_path} -i {temp_audio_path} -c:v copy -c:a aac {download_path}", stdout=PIPE, shell=True)
+        else:
+            process = Popen(f"ffmpeg -y -i {temp_video_path} -i {temp_audio_path} -c:v copy -c:a aac {download_path}", stdout=PIPE, shell=True)
         (output, err) = process.communicate()
         return_code = process.wait()
         success = return_code == 0
@@ -285,3 +321,4 @@ if __name__ == "__main__":
         args.output_dir,
         args.num_workers,
     )
+    # download_video("CPCoMyuBRM0", "test.mp4", resolution=720)
